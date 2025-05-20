@@ -67,11 +67,25 @@ class FootprintDatabase:
         self.year = year
         self.data = pd.DataFrame({"id": pd.Series(dtype=int), "impact_ids": pd.Series(dtype=str), "scores": pd.Series(dtype=float)})
 
+    ## Should it be renamed "record?" GMB
     def report(self, product_id, footprint):
+        """ Saves footprint in the database
+
+        Parameters
+        ----------
+        product_id : int
+            Uniquely identifies the product 
+        footprint : float
+            Footprint to be recorded
+        """        
+        # Make everything integers in the IDs internally
         self.data["id"] = self.data["id"].astype(int)
+
+        # Update the footprint if exists
         if product_id in self.data["id"].values:
             self.data.loc[self.data["id"] == product_id, "scores"] = footprint
         else:
+            # New entry created otherwise
             new_entry = pd.DataFrame({"id": [product_id], "impact_ids": ["CO2"], "scores": [footprint]})
             self.data = pd.concat([self.data, new_entry], ignore_index=True)
 
@@ -107,3 +121,7 @@ class System:
             company.add_product(product)
             company.sales = pd.DataFrame.from_dict(sales, orient="index", columns=["Sales"])
             self.companies[f"Company_{i+1}"] = company
+
+    ## Todo: checkupdateneeded()  GMB
+    ## Todo: system.solve(error_margin=None, forced_updates=0, etc.) to hide the code from the notebook
+

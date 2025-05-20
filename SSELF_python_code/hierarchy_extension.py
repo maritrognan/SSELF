@@ -19,7 +19,7 @@ class HierarchicalCompany(Company):
     def get_total_direct_impacts(self):
         total = self.direct_impacts.sum().sum()
         for sub in self.sub_companies:
-            total += sub.direct_impacts.sum().sum()
+            total += sub.get_total_direct_impacts() # GMB - suggestions
         return total
 
 
