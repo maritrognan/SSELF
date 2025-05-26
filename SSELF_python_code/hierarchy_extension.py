@@ -69,3 +69,37 @@ class HierarchicalSystem(System):
 
                 company.add_sub_company(sub)
                 self.product_id_counter += 1
+
+
+    def build_from_excel(self, filepath):
+        df = pd.read_excel(filepath)
+        entities = {}
+
+        for _, row in df.iterrows():
+            name = row['CompanyName']
+            parent = row['Parent']
+            year = row['Year']
+            product_id = row['ProductID']
+            product_name = row['ProductName']
+            unit = row['Unit']
+            sales = row['Sales']
+            emissions = row['DirectImpacts']
+
+            if name not in entities:
+                entities[name] = HierarchicalCompany(name, year, direct_impacts=pd.DataFrame({"kg CO2eq": [emissions]}))
+
+            company = entities[name]
+            if not hasattr(company, "sales") or company.sales.empty:
+                company.sales = pd.DataFrame(columns=["Sales"])
+
+            company.sales.loc[product_id] = [sales]
+            product = Product(product_id, product_name, unit, company)
+            company.add_product(product)
+
+            if pd.notna(parent):
+                if parent not in entities:
+                    entities[parent] = HierarchicalCompany(parent, year)
+                entities[parent].add_sub_company(company)
+
+        self.companies = {k: v for k, v in entities.items() if not any(k == sub.name for c in entities.values() for sub in getattr(c, "sub_companies", []))}
+        self.product_id_counter = max(row['ProductID'] for _, row in df.iterrows()) + 1

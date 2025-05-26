@@ -1,8 +1,9 @@
-# SSELF_base_minimal.py
+# SSELF_base.py
 
 import pandas as pd
 import numpy as np
 import random
+import time
 
 
 class Product:
@@ -23,6 +24,7 @@ class Company:
         self.direct_impacts = pd.DataFrame(direct_impacts) if direct_impacts is not None else pd.DataFrame()
         self.products = []
         self.latest_update = None
+        self.num_updates = 0
 
     def add_product(self, product):
         self.products.append(product)
@@ -56,6 +58,17 @@ class Company:
                 / sum(self.sales.loc[p.product_id, "Sales"] for p in self.products)
             )
             print(f"  Final footprint for {self.name}: {self.latest_update:.4f}")
+
+    def check_update_needed(self, footprint_db):
+        previous = self.latest_update
+        self.update_footprint(footprint_db)
+        new = self.latest_update
+        #self.num_updates = 0
+        if previous is None or not np.isclose(previous, new, atol=1e-6):
+            self.num_updates += 1
+            self.report_footprint(footprint_db)
+            return True
+        return False
 
     def report_footprint(self, footprint_db):
         for product in self.products:
@@ -122,6 +135,57 @@ class System:
             company.sales = pd.DataFrame.from_dict(sales, orient="index", columns=["Sales"])
             self.companies[f"Company_{i+1}"] = company
 
-    ## Todo: checkupdateneeded()  GMB
-    ## Todo: system.solve(error_margin=None, forced_updates=0, etc.) to hide the code from the notebook
+
+    def solve(self, footprint_db, forced_updates=0, verbose=True):
+        start_time = time.time()
+        updates_completed = False
+        iteration = 0
+
+        while not updates_completed:
+            iteration += 1
+            if verbose:
+                print(f"\n--- Iteration {iteration} ---")
+            any_company_updated = False
+
+            companies_to_check = list(self.companies.keys())
+            random.shuffle(companies_to_check)
+
+            for cname in companies_to_check:
+                company = self.companies[cname]
+                if verbose:
+                    print(f"Checking {cname}")
+                if company.check_update_needed(footprint_db):
+                    if verbose:
+                        print(f"  → Updated. New: {company.latest_update:.4f}")
+                    any_company_updated = True
+                elif verbose:
+                    print("  → No update needed.")
+
+            updates_completed = not any_company_updated
+
+        end_time = time.time()
+        print("\n✅ Updates completed.")
+        print(f"⏱️ Time taken: {end_time - start_time:.2f} seconds")
+
+        print("\n📦 Final Footprints:")
+        for cname, company in self.companies.items():
+            print(f"{cname}: {company.latest_update:.4f} kg CO2e/unit")
+
+        print("\n🔁 Update Count:")
+        total_updates = sum(c.num_updates for c in self.companies.values())
+        for cname, c in self.companies.items():
+            print(f"{cname}: {c.num_updates} updates")
+        print(f"Total updates: {total_updates}")
+
+        for i in range(forced_updates):
+            print(f"\n--- Forced Update Iteration {i + 1} ---")
+            for cname, company in self.companies.items():
+                company.update_footprint(footprint_db)
+                company.report_footprint(footprint_db)
+
+        print("\n🗃️ Final footprint database:")
+        print(footprint_db.data.sort_values("id"))
+
+    ## Todo: checkupdateneeded()  GMB -Done
+    ## Todo: system.solve(error_margin=None, forced_updates=0, etc.) to hide the code from the notebook -Done
 
