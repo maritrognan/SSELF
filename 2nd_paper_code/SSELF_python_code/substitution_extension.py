@@ -25,9 +25,27 @@ class Company(BaseCompany):
         self.num_updates = 0
 
     def update_footprint(self, fp_db_2024, fp_db_2023, last_year_sales_db):
-        scores = fp_db_2024.data.set_index("id")["scores"]
-        valid_ids = [i for i in self.purchases.index if i in scores.index]
-        total_impacts = float(scores.loc[valid_ids] @ self.purchases.loc[valid_ids]) + self.direct_impacts.sum().sum()
+        df24 = fp_db_2024.data.copy()
+        if not df24.empty:
+            df24["id"] = df24["id"].astype(int)
+        scores = df24.set_index("id")["scores"] if not df24.empty else pd.Series(dtype=float)
+
+        pur = self.purchases if isinstance(self.purchases, pd.Series) else pd.Series(dtype=float)
+        if not pur.empty:
+            try:
+                pur.index = pur.index.astype(int)
+            except Exception:
+                pur = pd.Series(dtype=float)
+
+        common = pur.index.intersection(scores.index)
+        in_emb = float(pur.loc[common] @ scores.loc[common]) if len(common) else 0.0
+        in_dir = 0.0
+        if isinstance(self.direct_impacts, pd.DataFrame) and not self.direct_impacts.empty:
+            try:
+                in_dir = float(self.direct_impacts.sum(numeric_only=True).sum())
+            except Exception:
+                in_dir = 0.0
+        total_impacts = in_emb + in_dir
 
         primary_impacts = {}
         for product in self.products:
@@ -57,47 +75,90 @@ class Company(BaseCompany):
         if data.empty:
             return 0
         fp_db.data["id"] = fp_db.data["id"].astype(int)
+        data = data.copy()
+        data["id"] = pd.to_numeric(data["id"], errors="coerce").fillna(0).astype(int)
         merged = data.merge(fp_db.data, on="id", how="left").fillna(0)
 
-        total = 0
-        weight = 0
+        total = 0.0
+        weight = 0.0
         for _, row in merged.iterrows():
-            conv = row["function_output"]
-            total += row["sales_volume"] * row["scores"] * conv
-            weight += row["sales_volume"] * conv
-        print(f"  [DEBUG] Average footprint for {class_code}: total impact = {total:.4f}, weight = {weight:.4f}")
-
-        return total / weight if weight > 0 else 0
+            conv = float(row["function_output"])
+            total += float(row["sales_volume"]) * float(row["scores"]) * conv
+            weight += float(row["sales_volume"]) * conv
+        return total / weight if weight > 0 else 0.0
 
     def check_update_needed(self, fp_db_2024, last_year_sales_db, fp_db_2023):
-        scores = fp_db_2024.data.set_index("id")["scores"]
-        valid_ids = [i for i in self.purchases.index if i in scores.index]
+        """
+        Decide if any product footprint would change given current inputs.
+        Mirrors the safe casting/alignment used in update_footprint(...).
+        """
+        # ---- Safe scores (2024) ----
+        df24 = fp_db_2024.data.copy()
+        if not df24.empty:
+            df24["id"] = df24["id"].astype(int)
+        scores24 = df24.set_index("id")["scores"] if not df24.empty else pd.Series(dtype=float)
 
-        total = float(scores.loc[valid_ids] @ self.purchases.loc[valid_ids]) + self.direct_impacts.sum().sum()
+        # ---- Safe purchases ----
+        pur = self.purchases if isinstance(self.purchases, pd.Series) else pd.Series(dtype=float)
+        if not pur.empty:
+            try:
+                pur.index = pur.index.astype(int)
+            except Exception:
+                pur = pd.Series(dtype=float)
 
+        # overlap
+        common = pur.index.intersection(scores24.index)
+        in_emb = float(pur.loc[common] @ scores24.loc[common]) if len(common) else 0.0
+
+        # ---- Safe direct impacts ----
+        in_dir = 0.0
+        if isinstance(self.direct_impacts, pd.DataFrame) and not self.direct_impacts.empty:
+            try:
+                in_dir = float(self.direct_impacts.sum(numeric_only=True).sum())
+            except Exception:
+                in_dir = 0.0
+
+        total = in_emb + in_dir
+
+        # ---- Helper: robust sales lookup ----
+        def sales_of(pid: int) -> float:
+            if not isinstance(self.sales, pd.DataFrame) or "Sales" not in self.sales.columns:
+                return 0.0
+            if pid not in self.sales.index:
+                return 0.0
+            try:
+                return float(self.sales.loc[pid, "Sales"])
+            except Exception:
+                return 0.0
+
+        # ---- Primary impacts bucket (like update_footprint) ----
         primary_impacts = {}
         for product in self.products:
-            sales_vol = self.sales.loc[product.product_id, "Sales"] if product.product_id in self.sales.index else 0
+            s_vol = sales_of(product.product_id)
             if product.primary_secondary == "primary":
-                primary_impacts[product.product_id] = total
+                primary_impacts[product.product_id] = float(total)
             else:
+                # Secondary: compute substitution credit using last-year sales + fp_db_2023
                 avg = self.get_average_footprint(product.class_code, last_year_sales_db, fp_db_2023)
-                sub_impact = avg * sales_vol * product.function_output
+                sub_impact = float(avg) * float(s_vol) * float(product.function_output)
+                # subtract from primaries
                 for p in self.products:
                     if p.primary_secondary == "primary":
                         primary_impacts[p.product_id] -= sub_impact
 
-        # Compare product-level footprints instead
+        # ---- Compare simulated vs current per product ----
         for product in self.products:
             if product.primary_secondary == "primary":
-                vol = self.sales.loc[product.product_id, "Sales"] if product.product_id in self.sales.index else 0
-                new_fp = primary_impacts[product.product_id] / vol if vol else 0
+                vol = sales_of(product.product_id)
+                new_fp = (primary_impacts.get(product.product_id, 0.0) / vol) if vol > 0 else 0.0
             else:
+                # For secondaries, intensity based on average * function_output.
+                # (Volume only used to short-circuit zero-sales case, matching your original logic)
+                vol = sales_of(product.product_id)
                 avg = self.get_average_footprint(product.class_code, last_year_sales_db, fp_db_2023)
-                vol = self.sales.loc[product.product_id, "Sales"]
-                new_fp = avg * product.function_output if vol else 0
+                new_fp = float(avg) * float(product.function_output) if vol > 0 else 0.0
 
-            current_fp = getattr(product, "footprint", 0)
+            current_fp = float(getattr(product, "footprint", 0.0) or 0.0)
 
             print(f"\n[{self.name}] Checking product {product.product_id} ({product.name})")
             print(f"  Current footprint: {current_fp:.6f}, Simulated footprint: {new_fp:.6f}")
@@ -225,50 +286,56 @@ class System(BaseSystem):
             fp_2024,
             fp_2023,
             last_year_sales,
-            atol=1e-6,  # kept for consistency with other versions, not passed through (your check uses 1e-6)
+            atol=1e-6,
             max_iter=200,
-            schedule="random",  # "random" or "cyclic"
-            seed=None,  # set for reproducible random order
+            seed=None,
             verbose=True,
-            patience=1,  # stop after this many consecutive no-update sweeps
+            progress_callback=None,
     ):
+        def _tick(it):
+            if progress_callback is None:
+                return
+            try:
+                setattr(self, "current_iteration", int(it))
+                progress_callback(int(it), self)
+            except Exception as _e:
+                if verbose:
+                    print(f"[progress_callback error at iter {it}]: {_e}")
+
         rng = random.Random(seed) if seed is not None else None
 
         start = time.time()
         total_updates = 0
         iterations = 0
-        no_update_streak = 0
+
+        # snapshot initial state
+        _tick(0)
 
         while iterations < max_iter:
             iterations += 1
             any_updated = False
-            names = self._ordered_company_names(schedule=schedule, rng=rng)
+            names = self._ordered_company_names(schedule="random", rng=rng)  # always random
 
             if verbose:
                 print(f"\n--- Iteration {iterations} ---")
 
             for cname in names:
                 comp = self.companies[cname]
-
-                # reuse your existing detection logic
                 needs = comp.check_update_needed(fp_2024, last_year_sales, fp_2023)
-
                 if needs:
                     if verbose:
                         print(f"{cname} was updated.")
-                    # reuse your existing updater
                     comp.update_footprint(fp_2024, fp_2023, last_year_sales)
                     total_updates += 1
                     any_updated = True
 
-            if not any_updated:
-                no_update_streak += 1
-            else:
-                no_update_streak = 0
+            # per-iteration snapshot
+            _tick(iterations)
 
-            if no_update_streak >= patience:
+            # fixed point reached → stop immediately
+            if not any_updated:
                 if verbose:
-                    print(f"\nNo updates needed for {no_update_streak} consecutive iteration(s). Converged.")
+                    print("\nNo updates needed in this sweep. Converged.")
                 break
 
         elapsed = time.time() - start
@@ -277,5 +344,10 @@ class System(BaseSystem):
             print(f"\nConverged in {iterations} iterations; total company updates applied: {total_updates}")
             print(f"Time taken: {elapsed:.2f} s")
 
+        # final snapshot (harmless if duplicate)
+        _tick(iterations)
+
         return {"iterations": iterations, "total_updates": total_updates, "seconds": elapsed}
+
+
 

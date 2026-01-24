@@ -59,16 +59,50 @@ class Company:
             )
             print(f"  Final footprint for {self.name}: {self.latest_update:.4f}")
 
-    def check_update_needed(self, footprint_db):
-        previous = self.latest_update
+    def check_update_needed(self, footprint_db, auto_update=True, approval_callback=None, atol=1e-6):
+        """
+        Decide whether this company's product footprints need updating.
+
+        AUTO mode:
+          - compute new intensity
+          - if changed: publish now (report_footprint) and count an update
+
+        MANUAL mode (only for user company):
+          - compute new intensity
+          - if changed: queue an approval event via approval_callback
+          - then ROLL BACK local changes so nothing is published/visible until approved
+        """
+        # Snapshot current state
+        previous = getattr(self, "latest_update", None)
+        prev_foot = {p.product_id: float(getattr(p, "footprint", 0.0)) for p in getattr(self, "products", [])}
+
+        # Compute candidate new values (this may modify self.*)
         self.update_footprint(footprint_db)
         new = self.latest_update
-        #self.num_updates = 0
-        if previous is None or not np.isclose(previous, new, atol=1e-6):
-            self.num_updates += 1
-            self.report_footprint(footprint_db)
-            return True
-        return False
+
+        changed = (previous is None) or (not np.isclose(previous, new, atol=atol))
+        if not changed:
+            return False
+
+        is_user_company = bool(getattr(self, "is_user_company", False))
+
+        # MANUAL: only for user company; queue & roll back
+        if is_user_company and (auto_update is False):
+            if approval_callback is not None:
+                approval_callback(self, (0.0 if previous is None else float(previous)), float(new), footprint_db)
+            # Roll back so the proposed change doesn't leak into the world yet
+            for p in getattr(self, "products", []):
+                try:
+                    p.footprint = prev_foot[p.product_id]
+                except Exception:
+                    pass
+            self.latest_update = previous
+            return True  # change detected (queued), but not published
+
+        # AUTO (or non-user companies): publish immediately
+        self.num_updates = getattr(self, "num_updates", 0) + 1
+        self.report_footprint(footprint_db)
+        return True
 
     def report_footprint(self, footprint_db):
         for product in self.products:
@@ -135,18 +169,42 @@ class System:
             company.sales = pd.DataFrame.from_dict(sales, orient="index", columns=["Sales"])
             self.companies[f"Company_{i+1}"] = company
 
-
-    def solve(self, footprint_db, forced_updates=0, verbose=True, progress_callback=None):
-
+    def solve(
+            self,
+            footprint_db,
+            forced_updates=0,
+            verbose=True,
+            progress_callback=None,
+            auto_update=True,  # NEW: True = publish immediately, False = queue approvals for user company
+            approval_callback=None,  # NEW: app-provided function to enqueue approvals
+            max_iter=5000,  # (optional) guard so we don't loop forever
+    ):
         start_time = time.time()
         updates_completed = False
         iteration = 0
 
-        while not updates_completed:
+        # Optional: snapshot initial state (iteration 0)
+        if progress_callback is not None:
+            try:
+                progress_callback(iteration, self)
+            except Exception as e:
+                if verbose:
+                    print(f"[progress_callback error at iter 0] {e}")
+
+        while not updates_completed and iteration < max_iter:
             iteration += 1
             if verbose:
                 print(f"\n--- Iteration {iteration} ---")
             any_company_updated = False
+
+            # ✅ EARLY SNAPSHOT (new block)
+            setattr(self, "current_iteration", int(iteration))
+            if progress_callback is not None:
+                try:
+                    progress_callback(iteration, self)
+                except Exception as e:
+                    if verbose:
+                        print(f"[progress_callback error at iter {iteration} (start)] {e}")
 
             companies_to_check = list(self.companies.keys())
             random.shuffle(companies_to_check)
@@ -155,22 +213,37 @@ class System:
                 company = self.companies[cname]
                 if verbose:
                     print(f"Checking {cname}")
-                if company.check_update_needed(footprint_db):
+                # >>> pass policy + callback down to the company
+                changed = company.check_update_needed(
+                    footprint_db,
+                    auto_update=auto_update,
+                    approval_callback=approval_callback,
+                )
+                if changed:
                     if verbose:
-                        print(f"  → Updated. New: {company.latest_update:.4f}")
+                        # latest_update may be unchanged in manual mode (we roll back on queue),
+                        # so keep the message generic.
+                        try:
+                            val = float(company.latest_update)
+                            print(f"  → Change detected. Latest: {val:.4f}")
+                        except Exception:
+                            print("  → Change detected.")
                     any_company_updated = True
                 elif verbose:
                     print("  → No update needed.")
 
-            # 🔴 NEW: call the hook after each iteration
+            # call the hook after each iteration
             if progress_callback is not None:
                 try:
                     progress_callback(iteration, self)
                 except Exception as e:
                     if verbose:
-                        print(f"[progress_callback error] {e}")
+                        print(f"[progress_callback error at iter {iteration}] {e}")
 
             updates_completed = not any_company_updated
+
+        if iteration >= max_iter and verbose:
+            print(f"\n⚠️ Reached max_iter={max_iter} without full convergence.")
 
         end_time = time.time()
         print("\n✅ Updates completed.")
@@ -178,12 +251,15 @@ class System:
 
         print("\n📦 Final Footprints:")
         for cname, company in self.companies.items():
-            print(f"{cname}: {company.latest_update:.4f} kg CO2e/unit")
+            try:
+                print(f"{cname}: {float(company.latest_update):.4f} kg CO2e/unit")
+            except Exception:
+                print(f"{cname}: N/A")
 
         print("\n🔁 Update Count:")
-        total_updates = sum(c.num_updates for c in self.companies.values())
+        total_updates = sum(getattr(c, "num_updates", 0) for c in self.companies.values())
         for cname, c in self.companies.items():
-            print(f"{cname}: {c.num_updates} updates")
+            print(f"{cname}: {getattr(c, 'num_updates', 0)} updates")
         print(f"Total updates: {total_updates}")
 
         for i in range(forced_updates):

@@ -15,6 +15,50 @@ class HierarchicalCompany(Company):
     def __init__(self, name, year, purchases=None, sales=None, direct_impacts=None):
         super().__init__(name, year, purchases, sales, direct_impacts)
         self.sub_companies = []
+        self._prod_signature = {}  # product_id -> tuple used to detect change
+
+    def _product_signature(self, footprint_db, product_id):
+        """
+        Compact, hashable snapshot of the inputs that determine a product's intensity.
+        Returns a tuple (in_emb, in_direct, sales_value), rounded to avoid float jitter.
+        """
+        # Upstream scores
+        df = footprint_db.data.copy()
+        if not df.empty:
+            df["id"] = df["id"].astype(int)
+            scores = df.set_index("id")["scores"]
+        else:
+            scores = pd.Series(dtype=float)
+
+        # Purchases aligned to scores
+        pur = self.purchases if isinstance(self.purchases, pd.Series) else pd.Series(dtype=float)
+        if not pur.empty:
+            try:
+                pur.index = pur.index.astype(int)
+            except Exception:
+                pur = pd.Series(dtype=float)
+
+        common = pur.index.intersection(scores.index)
+        in_emb = float(pur.loc[common] @ scores.loc[common]) if len(common) else 0.0
+
+        # Direct impacts total
+        in_direct = 0.0
+        if isinstance(self.direct_impacts, pd.DataFrame) and not self.direct_impacts.empty:
+            try:
+                in_direct = float(self.direct_impacts.sum(numeric_only=True).sum())
+            except Exception:
+                in_direct = 0.0
+
+        # Sales for this product
+        s = 0.0
+        if isinstance(self.sales, pd.DataFrame) and "Sales" in self.sales.columns and product_id in self.sales.index:
+            try:
+                s = float(self.sales.loc[product_id, "Sales"])
+            except Exception:
+                s = 0.0
+
+        # Round to stabilize comparisons
+        return (round(in_emb, 12), round(in_direct, 12), round(s, 12))
 
     def add_sub_company(self, sub_company):
         self.sub_companies.append(sub_company)
@@ -122,20 +166,39 @@ class HierarchicalCompany(Company):
             # No products to allocate → neutral default
             self.latest_update = 0.0
 
-    def check_update_needed(self, footprint_db):
+    def check_update_needed(self, footprint_db, atol=1e-6):
+        # 1) Children first (but do not early-return)
+        children_changed = False
         for sub in self.sub_companies:
-            if sub.check_update_needed(footprint_db):
-                return True
+            if sub.check_update_needed(footprint_db, atol=atol):
+                children_changed = True
 
+        # 2) Did any product's inputs change?
+        inputs_changed = False
+        for p in getattr(self, "products", []):
+            sig = self._product_signature(footprint_db, p.product_id)
+            if self._prod_signature.get(p.product_id) != sig:
+                inputs_changed = True
+                break
+
+        self_changed = False
         previous = self.latest_update
-        self.update_footprint(footprint_db)
-        new = self.latest_update
 
-        if previous is None or not np.isclose(previous, new, atol=1e-6):
-            self.num_updates += 1
-            self.report_footprint(footprint_db)
-            return True
-        return False
+        if inputs_changed:
+            # Recompute intensity and set product footprints
+            self.update_footprint(footprint_db)
+            new = self.latest_update
+            self_changed = (previous is None) or (not np.isclose(previous, new, atol=atol))
+
+            # Cache new signatures for ALL products
+            for p in getattr(self, "products", []):
+                self._prod_signature[p.product_id] = self._product_signature(footprint_db, p.product_id)
+
+            if self_changed:
+                self.num_updates += 1
+                self.report_footprint(footprint_db)
+
+        return children_changed or self_changed
 
     def carbon_balance(self, fp_db, atol=1e-6, verbose=False):
         """
@@ -494,7 +557,7 @@ class HierarchicalSystem(System):
         if not all_products:
             raise ValueError("No products found in the system. Build products before initializing accounting.")
 
-        all_pids = sorted([p.product_id for p in all_products])
+        all_pids = sorted({int(p.product_id) for p in all_products})
 
         self._entity_margins = {}
         for ent in self._iter_all_entities():
@@ -534,13 +597,35 @@ class HierarchicalSystem(System):
 
         # ---------- Solve loop (random by default; reproducible if random_state provided) ----------
 
-    def solve(self, footprint_db, forced_updates=0, verbose=True, random_state=None, max_iter=5000):
+    def solve(
+            self,
+            footprint_db,
+            forced_updates=0,
+            verbose=True,
+            random_state=None,
+            max_iter=5000,
+            progress_callback=None,  # <--- NEW
+    ):
+        # Helper: call progress_callback safely
+        def safe_call(cb, it, sys_obj):
+            if cb is None:
+                return
+            try:
+                cb(it, sys_obj)
+            except Exception as _e:
+                # don't crash the solver because of UI/collection issues
+                if verbose:
+                    print(f"[progress_callback error at iter {it}]: {_e}")
+
         # Step 0: initialize accounting (sets _entity_margins, baselines, etc.)
         self._initialize_accounting(random_state=random_state)
 
         start_time = time.time()
         updates_completed = False
         iteration = 0
+
+        # Snapshot initial state (iteration 0)
+        safe_call(progress_callback, iteration, self)
 
         while not updates_completed and iteration < max_iter:
             iteration += 1
@@ -585,6 +670,9 @@ class HierarchicalSystem(System):
 
             updates_completed = not any_company_updated
 
+            # Snapshot end-of-iteration state
+            safe_call(progress_callback, iteration, self)
+
         if iteration >= max_iter and verbose:
             print(f"\n⚠️ Reached max_iter={max_iter} without full convergence.")
 
@@ -606,6 +694,7 @@ class HierarchicalSystem(System):
             print(f"{cname}: {c.num_updates} updates")
         print(f"Total updates: {total_updates}")
 
+        # Optional extra passes, then final snapshot
         for i in range(forced_updates):
             print(f"\n--- Forced Update Iteration {i + 1} ---")
             for cname, company in self.companies.items():
@@ -614,3 +703,6 @@ class HierarchicalSystem(System):
 
         print("\n🗃️ Final footprint database:")
         print(footprint_db.data.sort_values("id"))
+
+        # Final state snapshot (post-forced updates)
+        safe_call(progress_callback, iteration, self)
