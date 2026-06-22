@@ -1,6 +1,6 @@
 # G2G_extension_region.py
 """
-SSELF Gate-to-Grave (G2G) extension — Region-average version.
+SSELF Gate-to-Grave extension — Region-average version.
 
 Intent
 ------
@@ -25,11 +25,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Any, Mapping, Protocol
+from typing import Dict, List, Optional, Tuple, Any, Mapping, Protocol, Callable
 
-from SSELF_base import Product  # your base class
+
 from hierarchy_extension import HierarchicalCompany as HCompany
 from substitution_extension import ClassificationDatabase
+
+from SSELF_base import Product as BaseProduct, FootprintDatabase
+
 
 
 # --------------------------------------------------------------------------------------
@@ -40,69 +43,16 @@ ImpactID = str
 RegionID = str
 ClassCode = str
 Year = int
+ComputeFlowsFn = Callable[["RuleSet", Mapping[str, float]], tuple[Dict[str, float], Optional[float]]]
 
 
-class FootprintRepositoryLike(Protocol):
-    """Adapter protocol for your FootprintRepository (from SSELF_base.py).
-
-    Required capability:
-    - get(product_id, impact_id, year) -> float
-    - report(product_id, impact_id, year, value) -> None
-    """
-
-    def get(self, product_id: Any, impact_id: ImpactID, year: Year) -> float: ...
-    def report(self, product_id: Any, impact_id: ImpactID, year: Year, value: float) -> None: ...
-
-class GateToGraveCalculator:
-    def __init__(
-        self,
-        rule_catalog: RuleCatalog,
-        market_db: AggregatedMarketDatabaseLike,
-        class_db: ClassificationDatabase | None = None,
-    ):
-        self.rule_catalog = rule_catalog
-        self.market_db = market_db
-        self.class_db = class_db
 
 
-class G2GProduct(Product):
-    def __init__(
-        self,
-        product_id,
-        name,
-        unit,
-        company,
-        *,
-        region: str,
-        class_code: str,
-        primary: bool = True,
-        function: str | None = None,
-        function_output: float | None = None,
-        constrained: bool = False,
-        lifetime_declared: float | None = None,
-        g2g_inputs: dict[str, float] | None = None,
-        g2g_emissions: dict[str, float] | None = None,
-    ):
+class G2GProduct(BaseProduct):
+    def __init__(self, product_id, name, unit, company, class_code, g2g_inputs=None):
         super().__init__(product_id, name, unit, company)
-
-        # Identification / classification
-        self.region = region
-        self.class_code = class_code     # FK -> ClassificationDatabase
-        self.primary = primary
-
-        # Functionality (ideally derived from ClassificationDB; optional cache)
-        self.function = function         # FK-ish -> ClassificationDatabase.function
-        self.function_output = function_output
-
-        # Substitution-related (if you reuse the same Product across extensions)
-        self.constrained = constrained
-
-        # Gate-to-grave support
-        self.lifetime_declared = lifetime_declared
-        self.g2g_inputs = g2g_inputs or {}      # producer-provided or declared attrs for G2G
-        self.g2g_emissions = g2g_emissions or {}  # optional: direct use-phase emissions etc.
-
-
+        self.class_code = class_code
+        self.g2g_inputs = g2g_inputs or {}
 
 class G2GCompany(HCompany):
     def __init__(self, company_id, name, *args, **kwargs):
@@ -114,17 +64,17 @@ class G2GCompany(HCompany):
         prod = self.get_product(product_id)  # adapt to your API
         prod.g2g_inputs[key] = float(value)
 
-    def compute_g2g_label(self, product_id, *, calc, repo, year, impact_id: str):
+    def compute_g2g_label(self, product_id, *, calc, fp_db, year, region_id: str):
         prod = self.get_product(product_id)
-        return calc.compute_g2g_footprint(
+        score, fu_total = calc.compute_g2g_score(
             product=prod,
-            repo=repo,
+            fp_db=fp_db,
             year=year,
-            region=prod.region,
-            impact_id=impact_id,
-            producer_params=prod.g2g_inputs,
-            store_result=True,  # “label” stored in repo
+            region_id=region_id,
+            producer_params=getattr(prod, "g2g_inputs", {}),
+            store_result=True,
         )
+        return score, fu_total
 
 
 class AggregatedMarketDatabaseLike(Protocol):
@@ -183,7 +133,7 @@ class FlowSpec:
 
     # Valuation definition: how to convert quantity -> impacts
     # We avoid ImpactFactorDB: valuation is pulled from AggregatedMarketDatabase by an intensity_key
-    intensity_key: str = ""
+    #intensity_key: str = ""
 
     # Optional: allow rule to scale quantity by a product-specific attribute (e.g., lifespan, wash_count)
     # In region-average mode these scalars can be defaults, or producer-provided.
@@ -234,6 +184,11 @@ class FlowSpec:
         return base_qty * scalar
 
 
+# returns dict[intensity_key -> qty], e.g. {"electricity_kwh": 18.0, ...}
+# (you can also return FU separately later)
+
+
+
 @dataclass
 class RuleSet:
     """
@@ -249,12 +204,27 @@ class RuleSet:
     name: str
     version: str
     valid_regions: List[RegionID] = field(default_factory=list)
+    market_key_map: Dict[str, str] = field(default_factory=dict)
 
     # Rule-level default parameters (used by FlowSpecs if scalar_param_name references these)
     rule_params: Dict[str, float] = field(default_factory=dict)
 
     # Flow specs
     flows: List[FlowSpec] = field(default_factory=list)
+
+    # Rule-specific calculation hook
+    compute_fn: Optional[ComputeFlowsFn] = None
+
+    def compute_flows(
+            self,
+            producer_params: Mapping[str, float],
+    ) -> tuple[Dict[str, float], Optional[float]]:
+        if self.compute_fn is None:
+            raise NotImplementedError(
+                f"RuleSet '{self.rule_set_id}' has no compute_fn. "
+                "Provide a rule-specific compute function."
+            )
+        return self.compute_fn(self, producer_params)
 
     def assert_region_supported(self, region_id: RegionID) -> None:
         if self.valid_regions and region_id not in self.valid_regions:
@@ -314,149 +284,134 @@ class RuleCatalog:
 # Calculator
 # --------------------------------------------------------------------------------------
 
-ImpactVector = Dict[ImpactID, float]
+#ImpactVector = Dict[ImpactID, float] #Not needed, prototype is simplified to one impact
 
 
 @dataclass
 class GateToGraveCalculator:
     """
-    Region-average G2G calculator:
-    - Uses RuleCatalog to select RuleSet based on product.class_code
-    - Pulls cradle-to-gate impacts from FootprintRepository
-    - Values rule flows using AggregatedMarketDatabase intensities
-    - Returns an ImpactVector and (optionally) writes it back to FootprintRepository
+    Region-average G2G calculator (prototype, single indicator):
+    - Reads cradle-to-gate score from FootprintDatabase (CO2 only)
+    - Adds post-production contributions valued via AggregatedMarketDatabaseLike
+    - Returns (total_score, functional_output_total)
     """
 
     rule_catalog: RuleCatalog
     market_db: AggregatedMarketDatabaseLike
+    class_db: Optional[ClassificationDatabase] = None
 
-    # Optional: if you want function_id lookups or reference units
-    class_db: Optional[ClassificationDatabaseLike] = None
-
-    def compute_g2g_footprint(
+    def compute_g2g_score(
         self,
         product: G2GProduct,
-        repo: FootprintRepositoryLike,
-        year: Year,
-        region_id: RegionID,
-        impacts: List[ImpactID],
+        fp_db: FootprintDatabase,
+        year: int,
+        region_id: str,
         producer_params: Optional[Mapping[str, float]] = None,
         store_result: bool = False,
-    ) -> ImpactVector:
-        """
-        Compute cradle-to-grave impacts for a product in a region/year.
+    ) -> tuple[float, Optional[float]]:
 
-        Parameters
-        ----------
-        product : G2GProduct
-        repo : FootprintRepositoryLike
-            Must already contain cradle-to-gate footprints for product.product_id.
-        year : int
-        region_id : str
-        impacts : list[str]
-            Which impact categories to compute.
-        producer_params : dict[str, float]
-            Producer-provided post-production params required/optional by rule FlowSpecs.
-            Example keys: "detergent_kg_per_life", "lifetime_washes", "electricity_kwh_per_use", etc.
-        store_result : bool
-            If True, writes computed cradle-to-grave impacts into repo via repo.report.
-
-        Returns
-        -------
-        ImpactVector: dict impact_id -> value
-        """
         producer_params = producer_params or {}
 
         ruleset = self.rule_catalog.resolve_ruleset(product.class_code)
         ruleset.assert_region_supported(region_id)
 
-        # Start from cradle-to-gate
-        total: ImpactVector = {}
-        for imp in impacts:
-            total[imp] = float(repo.get(product.product_id, imp, year))
+        # 1) Cradle-to-gate baseline (single indicator in base DB)
+        pid = int(product.product_id)
+        total_score = float(fp_db.get_footprint(pid))
 
-        # Add retail/use/EoL contributions as defined by RuleSet
-        for flow in ruleset.flows:
-            qty = flow.resolve_quantity(producer_params=producer_params, rule_params=ruleset.rule_params)
+        # 2) Compute semantic flows + optional functional output total
+        semantic_flows, fu_total = ruleset.compute_flows(producer_params=producer_params)
 
-            # Decide which impacts this flow contributes to
-            applicable = flow.applicable_impacts or impacts
-
-            for imp in applicable:
-                intensity = float(self.market_db.get_intensity(flow.intensity_key, region_id, imp, year))
-                total[imp] = total.get(imp, 0.0) + qty * intensity
+        # 3) Value flows using market intensities (still uses impact_id arg, but we pass "CO2")
+        IMPACT_ID = "CO2"
+        for flow_name, qty in semantic_flows.items():
+            if flow_name not in ruleset.market_key_map:
+                raise KeyError(
+                    f"RuleSet '{ruleset.rule_set_id}' missing market_key_map for flow '{flow_name}'."
+                )
+            market_key = ruleset.market_key_map[flow_name]
+            intensity = float(self.market_db.get_intensity(market_key, region_id, IMPACT_ID, int(year)))
+            total_score += float(qty) * intensity
 
         if store_result:
-            for imp, val in total.items():
-                repo.report(product.product_id, imp, year, val)
+            fp_db.report(pid, float(total_score))
 
-        return total
+        return float(total_score), fu_total
 
 
 # --------------------------------------------------------------------------------------
 # Helpers: dummy rule inspired by a PEFCR-like structure (for prototyping)
 # --------------------------------------------------------------------------------------
 
-def build_dummy_tshirt_ruleset(rule_set_id: str = "rule_tshirt_v0") -> RuleSet:
-    """
-    A minimal "dummy-ish" ruleset inspired by typical apparel logic.
-    You can adjust quantities/units later. The point is structure.
+def _get_param(
+    ruleset: RuleSet,
+    flow_id: str,
+    producer_params: Mapping[str, float],
+) -> float:
+    for f in ruleset.flows:
+        if f.flow_id == flow_id:
+            return f.resolve_quantity(
+                producer_params=producer_params,
+                rule_params=ruleset.rule_params,
+            )
+    raise KeyError(f"Missing FlowSpec '{flow_id}' in RuleSet '{ruleset.rule_set_id}'.")
 
-    Assumptions (illustrative only):
-    - Retail: average last-mile + store energy per item (default)
-    - Use: detergent kg + electricity kWh scaled by wash_count (default wash_count)
-    - EoL: default mass-based treatment (producer can optionally provide mass_kg)
-    """
+def tshirt_compute_flows(
+    ruleset: RuleSet,
+    producer_params: Mapping[str, float],
+) -> tuple[Dict[str, float], float]:
+
+    lifetime_uses = _get_param(ruleset, "lifetime_uses", producer_params)
+    uses_between_wash = _get_param(ruleset, "uses_between_wash", producer_params)
+    detergent_per_wash = _get_param(ruleset, "detergent_per_wash_kg", producer_params)
+    kwh_per_wash = _get_param(ruleset, "kwh_per_wash", producer_params)
+    retail_per_item = _get_param(ruleset, "retail_per_item", producer_params)
+    mass_kg = _get_param(ruleset, "mass_kg", producer_params)
+
+    if uses_between_wash <= 0:
+        raise ValueError("uses_between_wash must be > 0.")
+    if lifetime_uses <= 0:
+        raise ValueError("lifetime_uses must be > 0.")
+
+    wash_count = lifetime_uses / uses_between_wash
+
+    flows = {
+        "retail_stage": retail_per_item,
+        "detergent_use": detergent_per_wash * wash_count,
+        "electricity_use": kwh_per_wash * wash_count,
+        "eol_treatment": mass_kg,
+    }
+
+    functional_output_total = lifetime_uses
+    return flows, functional_output_total
+
+
+def build_illustrative_tshirt_ruleset(rule_set_id: str = "rule_tshirt_v0") -> RuleSet:
     return RuleSet(
         rule_set_id=rule_set_id,
-        name="Dummy T-shirt rule (PEFCR-inspired)",
-        version="0.1",
-        valid_regions=["EU"],  # change as needed
-        rule_params={
-            "wash_count": 30.0,      # default lifetime washes
-        },
+        name="Illustrative T-shirt rule (PEFCR-inspired)",
+        version="0.2",
+        valid_regions=["EU", "CA"],
         flows=[
-            # Retail (defaults)
+            FlowSpec("lifetime_uses", Stage.USE, "use", ParamSource.RULE_DEFAULT, default_quantity=100.0),
+            FlowSpec("uses_between_wash", Stage.USE, "use/wash", ParamSource.RULE_DEFAULT, default_quantity=3.0),
+            FlowSpec("detergent_per_wash_kg", Stage.USE, "kg/wash", ParamSource.RULE_DEFAULT, default_quantity=0.002),
+            FlowSpec("kwh_per_wash", Stage.USE, "kWh/wash", ParamSource.RULE_DEFAULT, default_quantity=0.6),
+            FlowSpec("retail_per_item", Stage.RETAIL, "item", ParamSource.RULE_DEFAULT, default_quantity=1.0),
             FlowSpec(
-                flow_id="retail_store_energy",
-                stage=Stage.RETAIL,
-                quantity_unit="item",
-                quantity_source=ParamSource.RULE_DEFAULT,
-                default_quantity=1.0,
-                intensity_key="retail_energy_per_item",
-            ),
-            # Use phase (defaults + scalar)
-            FlowSpec(
-                flow_id="use_detergent",
-                stage=Stage.USE,
-                quantity_unit="kg",
-                quantity_source=ParamSource.RULE_DEFAULT,
-                default_quantity=0.002,  # kg detergent per wash (illustrative)
-                intensity_key="detergent_generic_kg",
-                scalar_param_name="wash_count",
-                default_scalar=30.0,
-            ),
-            FlowSpec(
-                flow_id="use_electricity",
-                stage=Stage.USE,
-                quantity_unit="kWh",
-                quantity_source=ParamSource.RULE_DEFAULT,
-                default_quantity=0.6,   # kWh per wash (illustrative)
-                intensity_key="electricity_kwh",
-                scalar_param_name="wash_count",
-                default_scalar=30.0,
-            ),
-            # End-of-life (optional producer mass, else default)
-            FlowSpec(
-                flow_id="eol_treatment",
-                stage=Stage.EOL,
-                quantity_unit="kg",
-                quantity_source=ParamSource.PRODUCER_OPTIONAL,
-                default_quantity=0.2,  # default garment mass kg if not provided
+                "mass_kg", Stage.EOL, "kg",
+                ParamSource.PRODUCER_REQUIRED,
+                default_quantity=0.2,
                 producer_param_name="mass_kg",
-                intensity_key="textile_eol_avg_kg",
             ),
         ],
+        compute_fn=tshirt_compute_flows,
+        market_key_map={
+            "retail_stage": "MK_RETAIL_AVG_PER_ITEM",
+            "detergent_use": "MK_DETERGENT_KG",
+            "electricity_use": "MK_ELEC_KWH",
+            "eol_treatment": "MK_TEXTILE_EOL_KG",
+        },
     )
 
 
@@ -466,7 +421,7 @@ def build_region_average_rule_catalog() -> RuleCatalog:
     Adjust to match how you store HS codes (e.g., "6109" or "HS 6109").
     """
     catalog = RuleCatalog()
-    tshirt = build_dummy_tshirt_ruleset()
+    tshirt = build_illustrative_tshirt_ruleset()
     catalog.register_ruleset(tshirt)
 
     # Direct mapping for a single code
@@ -509,10 +464,10 @@ class InMemoryAggregatedMarketDatabase(AggregatedMarketDatabaseLike):
 #     # Build catalog + dummy market DB
 #     catalog = build_region_average_rule_catalog()
 #     market = InMemoryAggregatedMarketDatabase()
-#     market.set_intensity("retail_energy_per_item", "EU", "GWP100", 2026, 0.5)
-#     market.set_intensity("detergent_generic_kg", "EU", "GWP100", 2026, 2.0)
-#     market.set_intensity("electricity_kwh", "EU", "GWP100", 2026, 0.25)
-#     market.set_intensity("textile_eol_avg_kg", "EU", "GWP100", 2026, 1.2)
+#     market.set_intensity("MK_RETAIL_AVG_PER_ITEM", "EU", "GWP100", 2026, 0.5)
+#     market.set_intensity("MK_DETERGENT_KG", "EU", "GWP100", 2026, 2.0)
+#     market.set_intensity("MK_ELEC_KWH", "EU", "GWP100", 2026, 0.25)
+#     market.set_intensity("MK_TEXTILE_EOL_KG", "EU", "GWP100", 2026, 1.2)
 #
 #     calc = GateToGraveCalculator(rule_catalog=catalog, market_db=market)
 #     # You would pass your real Product + FootprintRepository instances here.

@@ -16,6 +16,94 @@ from substitution_extension import (
 )
 from SSELF_base import FootprintDatabase
 
+def _load_demo_classification_data():
+    return [
+        {
+            "class_code": "HS 2517",
+            "class_name": "Crushed stone, gravel and similar mineral aggregates",
+            "function": "Provide compactable mineral aggregate for construction fill or sub-base",
+            "unit": "m3 compacted aggregate-equivalent",
+        },
+        {
+            "class_code": "HS 2516",
+            "class_name": "Granite, basalt, sandstone and other building stone",
+            "function": "Provide compactable mineral aggregate for construction fill or sub-base",
+            "unit": "m3 compacted aggregate-equivalent",
+        },
+        {
+            "class_code": "HS 2523",
+            "class_name": "Portland cement and other hydraulic cements",
+            "function": "Provide hydraulic binder for cementitious mixtures",
+            "unit": "kg hydraulic binder-equivalent",
+        },
+        {
+            "class_code": "HS 2618",
+            "class_name": "Granulated slag from iron or steel manufacture",
+            "function": "Provide hydraulic binder for cementitious mixtures",
+            "unit": "kg hydraulic binder-equivalent",
+        },
+        {
+            "class_code": "HS 2621",
+            "class_name": "Ash and residues from combustion processes",
+            "function": "Provide supplementary cementitious material for cementitious mixtures",
+            "unit": "kg binder-equivalent",
+        },
+        {
+            "class_code": "HS 7204",
+            "class_name": "Ferrous waste and scrap",
+            "function": "Provide ferrous metallic feedstock for steelmaking",
+            "unit": "kg Fe-equivalent",
+        },
+        {
+            "class_code": "HS 7207",
+            "class_name": "Semi-finished products of iron or non-alloy steel",
+            "function": "Provide ferrous metallic feedstock for steelmaking",
+            "unit": "kg Fe-equivalent",
+        },
+        {
+            "class_code": "HS 3901",
+            "class_name": "Polyethylene",
+            "function": "Provide thermoplastic polymer feedstock for polyethylene applications",
+            "unit": "kg polymer-equivalent",
+        },
+        {
+            "class_code": "HS 3915",
+            "class_name": "Waste, parings and scrap of plastics",
+            "function": "Provide thermoplastic polymer feedstock for polyethylene applications",
+            "unit": "kg polymer-equivalent",
+        },
+        {
+            "class_code": "HS 2710",
+            "class_name": "Petroleum oils and oils from bituminous minerals",
+            "function": "Provide liquid fuel energy for combustion applications",
+            "unit": "MJ lower-heating-value",
+        },
+        {
+            "class_code": "HS 3826",
+            "class_name": "Biodiesel and mixtures thereof",
+            "function": "Provide liquid fuel energy for combustion applications",
+            "unit": "MJ lower-heating-value",
+        },
+        {
+            "class_code": "HS 2905",
+            "class_name": "Acyclic alcohols and derivatives",
+            "function": "Provide alcohol-based chemical feedstock or solvent function",
+            "unit": "kg alcohol-equivalent",
+        },
+        {
+            "class_code": "HS 2207",
+            "class_name": "Ethyl alcohol, undenatured or denatured",
+            "function": "Provide alcohol-based chemical feedstock or solvent function",
+            "unit": "kg alcohol-equivalent",
+        },
+        {
+            "class_code": "HS 8507",
+            "class_name": "Electric accumulators",
+            "function": "Provide rechargeable electrical energy storage capacity",
+            "unit": "kWh storage-capacity-equivalent",
+        },
+    ]
+
 st.set_page_config(page_title="SSELF — System Expansion & Substitution", layout="wide")
 st.title("SSELF — System Expansion & Substitution")
 st.markdown("""
@@ -61,7 +149,7 @@ with st.sidebar:
 
         st.divider()
         st.header("Run settings")
-        size = st.number_input("System size (companies = products)", 3, 200, 13, step=1)
+        size = st.number_input("System size (number of companies)", 3, 200, 13, step=1)
         seed = st.number_input("Random seed (optional)", value=42, step=1)
         max_iter = st.number_input("Max iterations", 50, 5000, 200, step=50)
         verbose = st.checkbox("Verbose logs", value=True)
@@ -69,49 +157,58 @@ with st.sidebar:
         st.divider()
         st.header("Your co-product (company input)")
         add_demo = st.checkbox("Add demo secondary outputs", value=True,
-                               help="Populate one company with a secondary co-product.")
-        demo_company_idx = st.number_input("Company index", 1, int(size), 11, step=1)
-        sec_name = st.text_input("Secondary product name", "Glycerol / Slag / Granite byproduct")
-        sec_class = st.text_input("Secondary class code", "HS 2905")
+                               help="Adds one co-product to the selected company to demonstrate substitution.")
+        demo_company_idx = st.number_input("Producing company", 1, int(size), 11, step=1)
+        sec_name = st.text_input("Co-product name", "examples: Granulated slag / plastic scrap / recovered alcohol")
+        sec_class = st.text_input("Co-product classification code", "HS 2618",
+                                help = "The classification code must correspond to an existing code in the demo classification database.")
 
 
-
-    # --- Function/unit hint for the chosen class code ---
-    # If the user uploaded a Classification CSV, use it to look up function & unit; else use the demo defaults.
+    # --- Resolve function and reference unit from classification code ---
     _unit_hint = None
     _func_hint = None
+
     try:
         if up_class is not None:
             _cls_df = pd.read_csv(up_class)
         else:
-            _cls_df = pd.DataFrame([
-                {"class_code": "HS 2517", "class_name": "Crushed stone", "function": "Fills space", "unit": "m3"},
-                {"class_code": "HS 2905", "class_name": "Alcohols", "function": "Chemical feedstock", "unit": "kg"},
-                {"class_code": "HS 2618", "class_name": "Slag", "function": "Binder", "unit": "kg"},
-            ])
-        row = _cls_df[_cls_df["class_code"].astype(str).str.strip() == str(sec_class).strip()]
+            _cls_df = pd.DataFrame(_load_demo_classification_data())
+
+        _cls_df["class_code"] = _cls_df["class_code"].astype(str).str.strip()
+        sec_class_clean = str(sec_class).strip()
+
+        row = _cls_df[_cls_df["class_code"] == sec_class_clean]
+
         if not row.empty:
             _func_hint = str(row.iloc[0]["function"])
             _unit_hint = str(row.iloc[0]["unit"])
-    except Exception:
-        pass
+
+    except Exception as e:
+        st.error(f"Could not resolve classification code: {e}")
 
     if _func_hint and _unit_hint:
-        st.caption(f"Function for **{sec_class}**: {_func_hint} — unit: `{_unit_hint}`")
+        st.caption(f"Function for **{sec_class}**: {_func_hint}")
+        st.caption(f"Reference unit of substituted function: `{_unit_hint}`")
+        sec_unit = _unit_hint
+    else:
+        st.warning(
+            "The selected co-product classification code was not found in the classification database. Choose a valid class code before running the simulation."
+        )
+        sec_unit = None
 
     sec_function_output = st.number_input(
-        f"Function output factor [{_unit_hint or 'unit'} per product unit]",
-        min_value=0.0, value=0.05, step=0.01,
-        help="Quantity of the substituted function delivered per unit of your secondary product."
+        f"Function-output factor [{_unit_hint or 'reference unit'} per $ of co-product sales]",
+        min_value=0.0,
+        value=0.05,
+        step=0.01,
+        help=(
+            "Quantity of substituted function delivered per dollar of co-product sales. The reference unit is resolved from the co-product classification code."
+        )
     )
-
-    # Autofill unit if known from classification (user can override if needed)
-    sec_unit = st.text_input("Secondary product unit", _unit_hint or "kg")
-
     sec_sales = st.number_input(
-        "Your secondary product sales last year (units)",
+        "Co-product sales value in the reporting period ($)",
         min_value=0.0, value=100.0, step=10.0,
-        help="This is your company’s sold quantity of the secondary product. The market averages and sales volumes come from the Last-year Sales table (upload or demo)."
+        help="How much you co-product you sold during the reporting period in \$. The market averages and sales volumes come from the Last-year Sales table (upload or demo)."
     )
 
 
@@ -125,31 +222,18 @@ if clear_btn:
 
 # ------------- helpers -------------
 def _load_classification_db(up_file):
-    # If user uploaded, use it
     if up_file is not None:
         df = pd.read_csv(up_file)
-        req = {"class_code","class_name","function","unit"}
+        req = {"class_code", "class_name", "function", "unit"}
         missing = req - set(df.columns)
         if missing:
             st.error(f"Classification CSV missing columns: {missing}")
             return None
         return ClassificationDatabase(df)
 
-    # Otherwise, provide an expanded demo set
-    data = [
-        {"class_code": "HS 2517", "class_name": "Crushed stone",      "function": "Fills space",            "unit": "m3"},
-        {"class_code": "HS 2905", "class_name": "Alcohols",           "function": "Chemical feedstock",     "unit": "kg"},
-        {"class_code": "HS 2618", "class_name": "Slag",               "function": "Binder",                 "unit": "kg"},
-        {"class_code": "HS 7204", "class_name": "Ferrous waste",      "function": "Steel scrap input",      "unit": "kg"},
-        {"class_code": "HS 2710", "class_name": "Petroleum oils",     "function": "Energy content",         "unit": "MJ"},
-        {"class_code": "HS 4407", "class_name": "Wood sawn",          "function": "Structural material",    "unit": "m3"},
-        {"class_code": "HS 2523", "class_name": "Cement",             "function": "Binder",                 "unit": "kg"},
-        {"class_code": "HS 3901", "class_name": "Polyethylene",       "function": "Polymer feedstock",      "unit": "kg"},
-        {"class_code": "HS 1001", "class_name": "Wheat",              "function": "Food energy",            "unit": "kg"},
-        {"class_code": "HS 1511", "class_name": "Palm oil",           "function": "Food/chemical feedstock","unit": "kg"},
-        {"class_code": "HS 8507", "class_name": "Batteries",          "function": "Electrical storage",     "unit": "kWh"},
-    ]
-    return ClassificationDatabase(data)
+    return ClassificationDatabase(_load_demo_classification_data())
+
+
 
 
 def _build_last_year_sales(year, class_db, up_file):
@@ -171,23 +255,39 @@ def _build_last_year_sales(year, class_db, up_file):
 
     # demo fill (mirrors your notebook)
     # seed three “primary” references to ensure substitution has a pool
-    demo_rows = [
-        {"id": 12, "class_code": "HS 2517", "sales_volume": 1000.0, "unit": "m3", "function_output": 0.5},
-        {"id": 14, "class_code": "HS 2905", "sales_volume": 2000.0, "unit": "kg", "function_output": 0.05},
-        {"id": 16, "class_code": "HS 2618", "sales_volume": 3000.0, "unit": "kg", "function_output": 0.7},
-    ]
-    # add extra rows per class
-    next_id = 17
-    base_fout = {"HS 2517": 0.5, "HS 2905": 0.05, "HS 2618": 0.7}
+    # Demo last-year market sales database.
+    # sales_volume is interpreted as annual sales value.
+    # function_output is reference units of function per dollar of sales.
+    demo_rows = []
+    next_id = 1000
+
+    default_function_output = {
+        "Provide compactable mineral aggregate for construction fill or sub-base": 0.03,
+        "Provide hydraulic binder for cementitious mixtures": 0.04,
+        "Provide supplementary cementitious material for cementitious mixtures": 0.04,
+        "Provide ferrous metallic feedstock for steelmaking": 0.08,
+        "Provide thermoplastic polymer feedstock for polyethylene applications": 0.06,
+        "Provide liquid fuel energy for combustion applications": 2.5,
+        "Provide alcohol-based chemical feedstock or solvent function": 0.05,
+        "Provide edible cereal dry matter for food applications": 0.10,
+        "Provide edible vegetable oil for food or oleochemical applications": 0.07,
+        "Provide rechargeable electrical energy storage capacity": 0.002,
+    }
+
     for code in class_db.data["class_code"].unique():
+        class_name, function, unit = class_db.get_class_info(code)
+        function_output = default_function_output.get(function, 1.0)
+
         for _ in range(2):
-            unit = class_db.get_class_info(code)[2]
             demo_rows.append({
-                "id": next_id, "class_code": code,
+                "id": next_id,
+                "class_code": code,
                 "sales_volume": float(np.random.uniform(500, 2000)),
-                "unit": unit, "function_output": float(base_fout.get(code, 1.0)),
+                "unit": unit,
+                "function_output": float(function_output),
             })
             next_id += 1
+
     sales_db.data = pd.DataFrame(demo_rows)
     return sales_db
 
@@ -484,6 +584,10 @@ def render_results(system, dfc, dfp, logs, verbose, fp_db):
 if run_btn:
     class_db = _load_classification_db(up_class)
     if class_db is None:
+        st.stop()
+
+    if add_demo and sec_unit is None:
+        st.error("Cannot add a co-product because the classification code could not be resolved.")
         st.stop()
 
     sales_db = _build_last_year_sales(2023, class_db, up_sales)

@@ -44,12 +44,19 @@ class Company:
         total_impacts += self.direct_impacts.sum().sum()
 
         for product in self.products:
+            current_footprint = float(getattr(product, "footprint", 0.0))
+
             product_footprint = (
                 total_impacts / self.sales.loc[product.product_id, "Sales"]
                 if product.product_id in self.sales.index and self.sales.loc[product.product_id, "Sales"] > 0
                 else 0
             )
-            print(f"  Product {product.name}: Assigned footprint {product_footprint:.4f}")
+
+            print(
+                f"  Product {product.name}: "
+                f"current footprint {current_footprint:.4f} → new footprint {product_footprint:.4f}"
+            )
+
             product.footprint = product_footprint
 
         if self.products:
@@ -57,7 +64,7 @@ class Company:
                 sum(p.footprint * self.sales.loc[p.product_id, "Sales"] for p in self.products)
                 / sum(self.sales.loc[p.product_id, "Sales"] for p in self.products)
             )
-            print(f"  Final footprint for {self.name}: {self.latest_update:.4f}")
+            #print(f"  Final footprint for {self.name}: {self.latest_update:.4f}")
 
     def check_update_needed(self, footprint_db, auto_update=True, approval_callback=None, atol=1e-6):
         """
@@ -181,7 +188,7 @@ class System:
     ):
         start_time = time.time()
         updates_completed = False
-        iteration = 0
+        iteration = int(getattr(self, "current_iteration", 0) or 0)
 
         # Optional: snapshot initial state (iteration 0)
         if progress_callback is not None:
@@ -221,17 +228,26 @@ class System:
                 )
                 if changed:
                     if verbose:
-                        # latest_update may be unchanged in manual mode (we roll back on queue),
-                        # so keep the message generic.
                         try:
                             val = float(company.latest_update)
                             print(f"  → Change detected. Latest: {val:.4f}")
                         except Exception:
                             print("  → Change detected.")
                     any_company_updated = True
+
+                    # Snapshot immediately after this company's update.
+                    # This matters in manual approval mode because the run may pause
+                    # before the end-of-iteration callback is reached.
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(iteration, self)
+                        except Exception as e:
+                            if verbose:
+                                print(f"[progress_callback error after {cname} at iter {iteration}] {e}")
+
                 elif verbose:
                     print("  → No update needed.")
-
+                    
             # call the hook after each iteration
             if progress_callback is not None:
                 try:
@@ -239,6 +255,13 @@ class System:
                 except Exception as e:
                     if verbose:
                         print(f"[progress_callback error at iter {iteration}] {e}")
+
+            # If a manual approval was queued, pause after completing the full sweep.
+            if getattr(self, "_ui_pause_after_sweep", False):
+                setattr(self, "_ui_pause_after_sweep", False)
+                if verbose:
+                    print("\n[paused] Waiting for manual approval before next iteration...")
+                return
 
             updates_completed = not any_company_updated
 
@@ -271,6 +294,5 @@ class System:
         print("\n🗃️ Final footprint database:")
         print(footprint_db.data.sort_values("id"))
 
-    ## Todo: checkupdateneeded()  GMB -Done
-    ## Todo: system.solve(error_margin=None, forced_updates=0, etc.) to hide the code from the notebook -Done
+
 

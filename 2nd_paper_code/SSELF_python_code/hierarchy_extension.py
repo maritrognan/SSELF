@@ -562,7 +562,7 @@ class HierarchicalSystem(System):
         self._entity_margins = {}
         for ent in self._iter_all_entities():
             # direct impacts
-            ent.direct_impacts = pd.DataFrame({"kg CO2eq": [int(rng.integers(0, 659))]})
+            ent.direct_impacts = pd.DataFrame({"kg CO2eq": [float(rng.integers(0, 659))]})
 
             # margin per entity
             margin = random.uniform(margin_low, margin_high)

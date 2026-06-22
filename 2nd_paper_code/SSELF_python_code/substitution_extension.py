@@ -71,21 +71,44 @@ class Company(BaseCompany):
         self.report_footprint(fp_db_2024)
 
     def get_average_footprint(self, class_code, sales_db, fp_db):
-        data = sales_db.get_sales_data_by_class_code(class_code)
+        """
+        Compute the market-average displaced intensity for the function
+        associated with class_code.
+
+        Unit logic:
+        - sales_volume is interpreted as annual sales value, e.g. dollars.
+        - scores are historical footprint intensities, e.g. kg CO2e/$.
+        - function_output is reference units of function per dollar.
+        - returned value is kg CO2e per reference unit of function.
+        """
+        data = sales_db.get_sales_data_by_function(class_code)
+
         if data.empty:
-            return 0
-        fp_db.data["id"] = fp_db.data["id"].astype(int)
+            return 0.0
+
+        fp_data = fp_db.data.copy()
+        fp_data["id"] = fp_data["id"].astype(int)
+
         data = data.copy()
         data["id"] = pd.to_numeric(data["id"], errors="coerce").fillna(0).astype(int)
-        merged = data.merge(fp_db.data, on="id", how="left").fillna(0)
+        data["sales_volume"] = pd.to_numeric(data["sales_volume"], errors="coerce").fillna(0.0)
+        data["function_output"] = pd.to_numeric(data["function_output"], errors="coerce").fillna(0.0)
 
-        total = 0.0
-        weight = 0.0
+        merged = data.merge(fp_data, on="id", how="left")
+        merged["scores"] = pd.to_numeric(merged["scores"], errors="coerce").fillna(0.0)
+
+        total_impact = 0.0
+        total_function = 0.0
+
         for _, row in merged.iterrows():
-            conv = float(row["function_output"])
-            total += float(row["sales_volume"]) * float(row["scores"]) * conv
-            weight += float(row["sales_volume"]) * conv
-        return total / weight if weight > 0 else 0.0
+            sales_value = float(row["sales_volume"])
+            footprint_per_dollar = float(row["scores"])
+            function_per_dollar = float(row["function_output"])
+
+            total_impact += sales_value * footprint_per_dollar
+            total_function += sales_value * function_per_dollar
+
+        return total_impact / total_function if total_function > 0 else 0.0
 
     def check_update_needed(self, fp_db_2024, last_year_sales_db, fp_db_2023):
         """
@@ -230,6 +253,32 @@ class SalesDatabase:
 
     def get_sales_data_by_class_code(self, class_code):
         return self.data[self.data["class_code"] == class_code]
+
+    def get_sales_data_by_function(self, class_code):
+        """
+        Return last-year sales records for all product classes that provide
+        the same governed function, expressed in the same reference unit,
+        as the selected class_code.
+        """
+        _, target_function, target_unit = self.classification_db.get_class_info(class_code)
+
+        if target_function is None or target_unit is None:
+            return self.data.iloc[0:0].copy()
+
+        class_info = self.classification_db.data.copy()
+        class_info["class_code"] = class_info["class_code"].astype(str).str.strip()
+        class_info["function"] = class_info["function"].astype(str).str.strip()
+        class_info["unit"] = class_info["unit"].astype(str).str.strip()
+
+        matching_codes = class_info[
+            (class_info["function"] == str(target_function).strip())
+            & (class_info["unit"] == str(target_unit).strip())
+            ]["class_code"].unique()
+
+        data = self.data.copy()
+        data["class_code"] = data["class_code"].astype(str).str.strip()
+
+        return data[data["class_code"].isin(matching_codes)]
 
 
 class System(BaseSystem):
