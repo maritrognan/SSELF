@@ -1,0 +1,18 @@
+product_id,company_id,name
+P1,C1.1.1,Orion Cola 500ml
+P2,C1.1.1,Orion Diet Cola 500ml
+P3,C1.1.2,Orion Orange Soda 330ml
+P4,C1.2,Orion Lemon Soda 1L
+P5,C1,Orion Admin Service
+P6,C2.1,Lumina Sparkling Water 500ml
+P7,C2.2,Lumina Energy Drink 250ml
+P8,C2,Lumina Brand Management
+P9,C3.1.1,Apex Ginger Ale 330ml
+P10,C3.1.1,Apex Zero Cola 500ml
+P11,C3,Apex Admin Support
+P12,C4.1,Nimbus Tonic Water 1L
+P13,C4.1,Nimbus Cola 500ml
+P14,C5.1,Vertex Iced Tea 500ml
+P15,C5.2,Vertex Cola 330ml
+P16,C5,Vertex Admin Service
+P17,C1.3.1,Orion T-Shirt (knitted or crocheted)
