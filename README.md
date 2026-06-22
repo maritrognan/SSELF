@@ -8,7 +8,7 @@ The prototype implements simplified versions of the SSELF framework extensions d
 
 ## Purpose of the prototype
 
-The prototype was developed as a research instrument to test whether the proposed framework extensions can be represented in executable form. It focuses on architectural and methodological logic rather than complete inventory coverage, empirical validation, or production-ready software engineering.
+The prototype was developed as a research instrument to test whether the proposed framework extensions can be represented in executable form, focusing on architectural and methodological logic.
 
 The prototype demonstrates:
 
@@ -23,7 +23,7 @@ The prototype demonstrates:
 
 A public Streamlit deployment is available here:
 
-**Streamlit app:** [insert Streamlit URL]
+**Streamlit app:** https://sself-demo.streamlit.app/
 
 The deployed app is provided for demonstration purposes. The GitHub repository and archived release, where available, should be treated as the reference version of the software associated with the manuscript.
 
