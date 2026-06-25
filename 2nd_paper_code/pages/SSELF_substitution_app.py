@@ -199,16 +199,21 @@ with st.sidebar:
     sec_function_output = st.number_input(
         f"Function-output factor [{_unit_hint or 'reference unit'} per $ of co-product sales]",
         min_value=0.0,
-        value=0.05,
-        step=0.01,
+        value=13.0,
+        step=1.0,
         help=(
             "Quantity of substituted function delivered per dollar of co-product sales. The reference unit is resolved from the co-product classification code."
         )
     )
-    sec_sales = st.number_input(
-        "Co-product sales value in the reporting period ($)",
-        min_value=0.0, value=100.0, step=10.0,
-        help="How much you co-product you sold during the reporting period in \$. The market averages and sales volumes come from the Last-year Sales table (upload or demo)."
+    sec_sales_ratio = st.number_input(
+        "Co-product sales value relative to the main product",
+        min_value=0.0,
+        value=0.2,
+        step=0.1,
+        help=(
+            "Relative sales value of the co-product compared with the selected company's main product. A value of 1 means the co-product has the same sales value as the main product; 0.5 means half; 0.1 means 10%. Note: high ratios may lead to negative footprints of other products."
+
+        )
     )
 
 
@@ -261,22 +266,41 @@ def _build_last_year_sales(year, class_db, up_file):
     demo_rows = []
     next_id = 1000
 
-    default_function_output = {
-        "Provide compactable mineral aggregate for construction fill or sub-base": 0.03,
-        "Provide hydraulic binder for cementitious mixtures": 0.04,
-        "Provide supplementary cementitious material for cementitious mixtures": 0.04,
-        "Provide ferrous metallic feedstock for steelmaking": 0.08,
-        "Provide thermoplastic polymer feedstock for polyethylene applications": 0.06,
-        "Provide liquid fuel energy for combustion applications": 2.5,
-        "Provide alcohol-based chemical feedstock or solvent function": 0.05,
-        "Provide edible cereal dry matter for food applications": 0.10,
-        "Provide edible vegetable oil for food or oleochemical applications": 0.07,
-        "Provide rechargeable electrical energy storage capacity": 0.002,
+    default_function_output_by_class = {
+        # m3 compacted aggregate-equivalent per $ of sales
+        "HS 2517": 0.04,
+        "HS 2516": 0.025,
+
+        # kg hydraulic binder-equivalent per $ of sales
+        "HS 2523": 6.25,
+        "HS 2618": 13.0,
+
+        # kg binder-equivalent per $ of sales
+        "HS 2621": 15.0,
+
+        # kg Fe-equivalent per $ of sales
+        "HS 7204": 3.0,
+        "HS 7207": 1.4,
+
+        # kg polymer-equivalent per $ of sales
+        "HS 3901": 0.7,
+        "HS 3915": 2.0,
+
+        # MJ lower-heating-value per $ of sales
+        "HS 2710": 35.0,
+        "HS 3826": 25.0,
+
+        # kg alcohol-equivalent per $ of sales
+        "HS 2905": 1.0,
+        "HS 2207": 1.5,
+
+        # kWh storage-capacity-equivalent per $ of sales
+        "HS 8507": 0.008,
     }
 
     for code in class_db.data["class_code"].unique():
         class_name, function, unit = class_db.get_class_info(code)
-        function_output = default_function_output.get(function, 1.0)
+        function_output = default_function_output_by_class.get(str(code).strip(), 1.0)
 
         for _ in range(2):
             demo_rows.append({
@@ -350,7 +374,7 @@ def run_simulation(
     size:int, seed:int, max_iter:int, verbose:bool,
     classification_db: ClassificationDatabase,
     add_demo_secondary: bool, demo_company_idx:int, sec_name:str, sec_class:str, sec_unit:str,
-    sec_function_output: float, sec_sales: float,
+    sec_function_output: float, sec_sales_ratio: float,
     last_year_sales: SalesDatabase,
 ):
 
@@ -367,12 +391,31 @@ def run_simulation(
         key = f"Company_{int(demo_company_idx)}"
         if key in system.companies:
             comp = system.companies[key]
+
+            primary_sales = 0.0
+            for p in comp.products:
+                if getattr(p, "primary_secondary", None) == "primary":
+                    if p.product_id in comp.sales.index:
+                        primary_sales += float(comp.sales.loc[p.product_id, "Sales"])
+
+            if primary_sales <= 0 and isinstance(comp.sales, pd.DataFrame) and "Sales" in comp.sales.columns:
+                primary_sales = float(comp.sales["Sales"].sum())
+
+            sec_sales = float(sec_sales_ratio) * primary_sales
+
             new_id = int(max([p.product_id for p in comp.products] + [size]) + 1)
-            sec = Product(new_id, sec_name, sec_unit, comp, sec_class, "secondary", float(sec_function_output), classification_db)
+            sec = Product(new_id, sec_name, sec_unit, comp, sec_class, "secondary", float(sec_function_output),
+                          classification_db)
             comp.add_product(sec)
+
             if comp.sales.empty:
                 comp.sales = pd.DataFrame(columns=["Sales"])
+
             comp.sales.loc[new_id] = [float(sec_sales)]
+
+            system._demo_primary_sales_reference = primary_sales
+            system._demo_secondary_sales = sec_sales
+            system._demo_secondary_sales_ratio = float(sec_sales_ratio)
 
     # 3) initialize DBs
     fp_2023 = FootprintDatabase(2023)
@@ -380,13 +423,42 @@ def run_simulation(
 
     for company in system.companies.values():
         for product in company.products:
-            fp_2023.report(int(product.product_id), float(np.random.uniform(1, 100)))  # historical intensity
+            fp_2023.report(int(product.product_id), float(np.random.uniform(0.2, 5.0)))
             fp_2024.report(int(product.product_id), 0.0)
 
-    # also ensure all ids that appear in last_year_sales exist in 2023 DB
+    # Demo last-year market footprint scores.
+    # Unit: kg CO2e per $ of sales.
+    # These are illustrative order-of-magnitude values, not empirical estimates.
+    default_market_score_by_class = {
+        "HS 2517": 0.30,
+        "HS 2516": 0.25,
+        "HS 2523": 5.70,
+        "HS 2618": 0.40,
+        "HS 2621": 0.20,
+        "HS 7204": 0.25,
+        "HS 7207": 2.50,
+        "HS 3901": 1.60,
+        "HS 3915": 0.30,
+        "HS 2710": 2.70,
+        "HS 3826": 1.20,
+        "HS 2905": 1.80,
+        "HS 2207": 1.20,
+        "HS 8507": 0.70,
+    }
+
+    existing_ids = set(fp_2023.data["id"].astype(int).tolist())
+
     for row in last_year_sales.data.itertuples():
-        if int(row.id) not in fp_2023.data["id"].astype(int).values:
-            fp_2023.report(int(row.id), float(np.random.uniform(1, 100)))
+        pid = int(row.id)
+
+        if pid not in existing_ids:
+            class_code = str(row.class_code).strip()
+            score = default_market_score_by_class.get(
+                class_code,
+                float(np.random.uniform(0.2, 5.0))
+            )
+            fp_2023.report(pid, score)
+            existing_ids.add(pid)
 
     # 4) run solver (captures iteration history)
     hook = _make_progress_hook(system)
@@ -602,7 +674,7 @@ if run_btn:
             classification_db=class_db,
             add_demo_secondary=add_demo, demo_company_idx=demo_company_idx,
             sec_name=sec_name, sec_class=sec_class, sec_unit=sec_unit,
-            sec_function_output=sec_function_output, sec_sales=sec_sales,
+            sec_function_output=sec_function_output, sec_sales_ratio=sec_sales_ratio,
             last_year_sales=sales_db,
         )
 
